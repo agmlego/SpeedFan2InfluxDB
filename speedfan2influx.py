@@ -1,45 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import configparser
-import json
 from csv import DictReader
 from datetime import datetime
-from enum import IntEnum
 from glob import glob
-from numbers import Number
 from os.path import basename, join
 from socket import gethostname
-from typing import Sequence
 
 import arrow
-from influxdb import InfluxDBClient
+from arrow.arrow import Arrow
+from influxdb import InfluxDBClient, SeriesHelper
 
 config = configparser.ConfigParser()
 config.read('config.ini')
-
-
-class InfluxClient:
-    '''Manages an InfluxDB connection'''
-
-    def __init__(self, host, port, user, password, database):
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
-        self.client = InfluxDBClient(
-            host=self.host,
-            port=self.port,
-            username=self.user,
-            password=self.password,
-            database=self.database
-        )
-
-    def write_to_influx(self, packet: Sequence[dict]):
-        '''Write a list of dicts to the database'''
-        if type(packet) == dict:
-            packet = [packet]
-        self.client.write_points(packet)
 
 
 class SpeedFan:
@@ -47,71 +20,72 @@ class SpeedFan:
 
     INSTALL_KEY = r'SOFTWARE\WOW6432Node\SpeedFan'
 
-    class MetricTypes(IntEnum):
-        TEMPERATURE = 1
-        PWM = 2
-        FAN = 3
-        VOLTAGE = 4
+    class Temp(SeriesHelper):
+        class Meta:
+            client = None
+            series_name = '°C'
+            fields = ['value']
+            time_precision = 's'
+            tags = [
+                'metric',
+                'chipset',
+                'index',
+                'host',
+                'wanted',
+                'warning',
+                'offset',
+                'used_pwms'
+            ]
+            bulk_size = 100
+            autocommit = True
 
-    class Metric:
-        def __init__(self, source: str, name: str, index: int, metric_type: IntEnum, units: str, hostname: str):
-            self.source = source
-            self.name = name
-            self.index = index
-            self.metric_type = metric_type
-            self.units = units
-            self.hostname = hostname
-            self.tags = {
-                'metric': self.name,
-                'chipset': self.source,
-                'index': self.index,
-                'host': self.hostname
-            }
+    class PWM(SeriesHelper):
+        class Meta:
+            client = None
+            series_name = '%'
+            fields = ['value']
+            time_precision = 's'
+            tags = [
+                'metric',
+                'chipset',
+                'index',
+                'host',
+                'minimum',
+                'maximum',
+                'variate'
+            ]
+            bulk_size = 100
+            autocommit = True
 
-        def __str__(self) -> str:
-            return f'{self.name} ({self.metric_type} {self.index} on {self.source})'
+    class Fan(SeriesHelper):
+        class Meta:
+            client = None
+            series_name = 'RPM'
+            fields = ['value']
+            time_precision = 's'
+            tags = [
+                'metric',
+                'chipset',
+                'index',
+                'host'
+            ]
+            bulk_size = 100
+            autocommit = True
 
-        def to_influx(self, timestamp: arrow, measurement: Number) -> dict:
-            '''Returns an InfluxDB-compatible measurement'''
-            datapoint = {
-                'measurement': self.units,
-                'tags': self.tags,
-                'time': timestamp.to('utc').format('YYYY-MM-DDTHH:mm:ss[Z]'),
-                'fields': {
-                    'value': measurement
-                }
-            }
-            return datapoint
-
-    class Temp(Metric):
-        def __init__(self, source: str, name: str, index: int, units: str, hostname: str, wanted: Number = None, warning: Number = None, offset: Number = 0, used_pwms: Number = 0):
-            super().__init__(source, name, index, SpeedFan.MetricTypes.TEMPERATURE, units, hostname)
-            self.wanted = wanted
-            self.warning = warning
-            self.offset = offset
-            self.used_pwms = used_pwms
-            self.tags['wanted'] = self.wanted
-            self.tags['warning'] = self.warning
-            self.tags['offset'] = self.offset
-            self.tags['used_pwms'] = self.used_pwms
-
-    class PWM(Metric):
-        def __init__(self, source: str, name: str, index: int, hostname: str, minimum: Number = 0, maximum: Number = 100, variate: bool = False):
-            super().__init__(source, name, index, SpeedFan.MetricTypes.PWM, '%', hostname)
-            self.minimum = minimum
-            self.maximum = maximum
-            self.variate = variate
-            self.tags['minimum'] = self.minimum
-            self.tags['maximum'] = self.maximum
-            self.tags['variate'] = self.variate
-
-    class Fan(Metric):
-        def __init__(self, source: str, name: str, index: int, hostname: str):
-            super().__init__(source, name, index, SpeedFan.MetricTypes.FAN, 'RPM', hostname)
-
-    class Volt(Metric):
-        def __init__(self, source: str, name: str, index: int, hostname: str):
-            super().__init__(source, name, index, SpeedFan.MetricTypes.VOLTAGE, 'V', hostname)
+    class Volt(SeriesHelper):
+        class Meta:
+            client = None
+            series_name = 'V'
+            fields = ['value']
+            time_precision = 's'
+            tags = [
+                'metric',
+                'chipset',
+                'index',
+                'host'
+            ]
+            bulk_size = 100
+            autocommit = True
 
     def __init__(self, install_dir=None, hostname=None):
         if install_dir is None:
@@ -121,6 +95,7 @@ class SpeedFan:
         self._params = self._get_params()
         self.temp_units = ('°F', '°C')[
             self._params.getboolean('speedfan', 'UseCelsius')]
+        SpeedFan.Temp.Meta.series_name = self.temp_units
         self.log_has_header = self._params.getboolean(
             'speedfan', 'LogAddHeader')
         self.tzinfo = datetime.now().astimezone().tzinfo
@@ -185,48 +160,56 @@ class SpeedFan:
 
                 # create metric of the right type
                 if metric_type == 'Temp':
-                    metric = SpeedFan.Temp(
-                        source=source,
-                        name=name,
-                        index=index,
-                        units=self.temp_units,
-                        hostname=self.hostname,
-                        wanted=params['wanted'],
-                        warning=params['warning'],
-                        offset=params['offset'],
-                        used_pwms=params['UsedPwms']
-                    )
+                    metric = {
+                        'type': 'temp',
+                        'function': float,
+                        'chipset': source,
+                        'metric': name,
+                        'index': index,
+                        'units': self.temp_units,
+                        'hostname': self.hostname,
+                        'wanted': params['wanted'],
+                        'warning': params['warning'],
+                        'offset': params['offset'],
+                        'used_pwms': params['UsedPwms']
+                    }
                 elif metric_type == 'Pwm':
-                    metric = SpeedFan.PWM(
-                        source=source,
-                        name=name,
-                        index=index,
-                        hostname=self.hostname,
-                        minimum=params['minimum'],
-                        maximum=params['maximum'],
-                        variate=params['variate']
-                    )
+                    metric = {
+                        'type': 'pwm',
+                        'function': float,
+                        'chipset': source,
+                        'metric': name,
+                        'index': index,
+                        'hostname': self.hostname,
+                        'minimum': params['minimum'],
+                        'maximum': params['maximum'],
+                        'variate': params['variate']
+                    }
                 elif metric_type == 'Fan':
-                    metric = SpeedFan.Fan(
-                        source=source,
-                        name=name,
-                        index=index,
-                        hostname=self.hostname
-                    )
+                    metric = {
+                        'type': 'fan',
+                        'function': int,
+                        'chipset': source,
+                        'metric': name,
+                        'index': index,
+                        'hostname': self.hostname
+                    }
                 elif metric_type == 'Volt':
-                    metric = SpeedFan.Volt(
-                        source=source,
-                        name=name,
-                        index=index,
-                        hostname=self.hostname
-                    )
+                    metric = {
+                        'type': 'volt',
+                        'function': float,
+                        'chipset': source,
+                        'metric': name,
+                        'index': index,
+                        'hostname': self.hostname
+                    }
 
                 self.metrics[name] = metric
 
-    def find_last(self, client: InfluxClient):
-        '''Locate the last data in the database and return an Arrow'''
-        results = client.client.query(
-            'SELECT LAST(value) FROM "°C","RPM","%","V" WHERE host=$host', bind_params={'host': self.hostname})
+    def find_last(self, client: InfluxDBClient) -> Arrow:
+        '''Locate the last data in the database and return it as an Arrow'''
+        results = client.query(
+            'SELECT LAST(value) FROM "°C","°F","RPM","%","V" WHERE host=$host', bind_params={'host': self.hostname})
         last = arrow.get(0)
         for series in results.raw['series']:
             series_last = arrow.get(series['values'][0][0]).to(self.tzinfo)
@@ -234,8 +217,14 @@ class SpeedFan:
                 last = series_last
         return last
 
-    def parse_logs(self, client: InfluxClient):
+    def parse_logs(self, client: InfluxDBClient):
         '''Loop through all logs and write the data to Influx'''
+
+        SpeedFan.Temp.Meta.client = client
+        SpeedFan.PWM.Meta.client = client
+        SpeedFan.Fan.Meta.client = client
+        SpeedFan.Volt.Meta.client = client
+
         logfiles = glob(join(self._dir, 'SFLog*.csv'))
         last = self.find_last(client)
         for logfile in logfiles:
@@ -256,33 +245,65 @@ class SpeedFan:
                     # old row that is already in the database, skip
                     continue
                 for name in self.header[1:]:
-                    if self.metrics[name].metric_type == SpeedFan.MetricTypes.TEMPERATURE:
-                        packet = self.metrics[name].to_influx(
-                            timestamp, float(log[name]))
+                    value = self.metrics[name]['function'](log[name])
+                    dt = timestamp.to('utc').format('YYYY-MM-DDTHH:mm:ss[Z]')
+                    if self.metrics[name]['type'] == 'temp':
+                        SpeedFan.Temp(
+                            host=self.metrics[name]['hostname'],
+                            chipset=self.metrics[name]['chipset'],
+                            index=self.metrics[name]['index'],
+                            metric=self.metrics[name]['metric'],
+                            value=value,
+                            time=dt,
+                            wanted=self.metrics[name]['wanted'],
+                            warning=self.metrics[name]['warning'],
+                            offset=self.metrics[name]['offset'],
+                            used_pwms=self.metrics[name]['used_pwms']
+                        )
 
-                    elif self.metrics[name].metric_type == SpeedFan.MetricTypes.VOLTAGE:
-                        packet = self.metrics[name].to_influx(
-                            timestamp, float(log[name]))
+                    elif self.metrics[name]['type'] == 'pwm':
+                        SpeedFan.PWM(
+                            host=self.metrics[name]['hostname'],
+                            chipset=self.metrics[name]['chipset'],
+                            index=self.metrics[name]['index'],
+                            metric=self.metrics[name]['metric'],
+                            value=value,
+                            time=dt,
+                            minimum=self.metrics[name]['minimum'],
+                            maximum=self.metrics[name]['maximum'],
+                            variate=self.metrics[name]['variate']
+                        )
 
-                    elif self.metrics[name].metric_type == SpeedFan.MetricTypes.FAN:
-                        packet = self.metrics[name].to_influx(
-                            timestamp, int(log[name]))
+                    elif self.metrics[name]['type'] == 'fan':
+                        SpeedFan.Fan(
+                            host=self.metrics[name]['hostname'],
+                            chipset=self.metrics[name]['chipset'],
+                            index=self.metrics[name]['index'],
+                            metric=self.metrics[name]['metric'],
+                            value=value,
+                            time=dt
+                        )
 
-                    elif self.metrics[name].metric_type == SpeedFan.MetricTypes.PWM:
-                        packet = self.metrics[name].to_influx(
-                            timestamp, float(log[name]))
-                    client.write_to_influx(packet)
+                    elif self.metrics[name]['type'] == 'volt':
+                        SpeedFan.Volt(
+                            host=self.metrics[name]['hostname'],
+                            chipset=self.metrics[name]['chipset'],
+                            index=self.metrics[name]['index'],
+                            metric=self.metrics[name]['metric'],
+                            value=value,
+                            time=dt
+                        )
 
 
 if __name__ == '__main__':
-    influx = InfluxClient(
-        config.get('database', 'host'),
-        config.getint('database', 'port'),
-        config.get('database', 'user'),
-        config.get('database', 'password'),
-        config.get('database', 'database')
+    influx = InfluxDBClient(
+        host=config.get('database', 'host'),
+        port=config.getint('database', 'port'),
+        username=config.get('database', 'user'),
+        password=config.get('database', 'password'),
+        database=config.get('database', 'database')
     )
 
-    speedfan = SpeedFan()
+    speedfan = SpeedFan('E:\\','LabPC-4')
     print(speedfan.header)
     speedfan.parse_logs(influx)
