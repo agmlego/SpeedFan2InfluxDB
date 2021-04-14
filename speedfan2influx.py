@@ -223,12 +223,28 @@ class SpeedFan:
 
                 self.metrics[name] = metric
 
+    def find_last(self, client: InfluxClient):
+        '''Locate the last data in the database and return an Arrow'''
+        results = client.client.query(
+            'SELECT LAST(value) FROM "°C","RPM","%","V" WHERE host=$host', bind_params={'host': self.hostname})
+        last = arrow.get(0)
+        for series in results.raw['series']:
+            series_last = arrow.get(series['values'][0][0]).to(self.tzinfo)
+            if last < series_last:
+                last = series_last
+        return last
+
     def parse_logs(self, client: InfluxClient):
         '''Loop through all logs and write the data to Influx'''
         logfiles = glob(join(self._dir, 'SFLog*.csv'))
+        last = self.find_last(client)
         for logfile in logfiles:
             logtime = arrow.get(basename(logfile)[5:13], 'YYYYMMDD').replace(
                 tzinfo=self.tzinfo)
+            if logtime.date() < last.date():
+                # old logfile from before the date of the last log in database, skip
+                print(f'Skipping {logfile}, older than {last}')
+                continue
             if self.log_has_header:
                 logs = DictReader(open(logfile), delimiter='\t')
             else:
@@ -236,6 +252,9 @@ class SpeedFan:
                                   fieldnames=self.header)
             for log in logs:
                 timestamp = logtime.shift(seconds=int(log['Seconds']))
+                if timestamp < last:
+                    # old row that is already in the database, skip
+                    continue
                 for name in self.header[1:]:
                     if self.metrics[name].metric_type == SpeedFan.MetricTypes.TEMPERATURE:
                         packet = self.metrics[name].to_influx(
