@@ -91,7 +91,7 @@ class SpeedFan:
             bulk_size = 100
             autocommit = True
 
-    def __init__(self, install_dir=None, hostname=None):
+    def __init__(self, install_dir=None, hostname=None, bulk_size: int = 100):
         if install_dir is None:
             self._dir = self._get_dir()
         else:
@@ -100,6 +100,10 @@ class SpeedFan:
         self.temp_units = ('°F', '°C')[
             self._params.getboolean('speedfan', 'UseCelsius')]
         SpeedFan.Temp.Meta.series_name = self.temp_units
+        SpeedFan.Temp.Meta.bulk_size = bulk_size
+        SpeedFan.PWM.Meta.bulk_size = bulk_size
+        SpeedFan.Fan.Meta.bulk_size = bulk_size
+        SpeedFan.Volt.Meta.bulk_size = bulk_size
         self.log_has_header = self._params.getboolean(
             'speedfan', 'LogAddHeader')
         self.tzinfo = datetime.now().astimezone().tzinfo
@@ -324,7 +328,7 @@ if __name__ == '__main__':
         database=config.get('database', 'database')
     )
 
-    speedfan = SpeedFan()
+    speedfan = SpeedFan(bulk_size = config.getint('database','bulk_size'))
     logger.debug(f'Got headers: {speedfan.header}')
     period = config.getfloat('schedule', 'polling_period')
     schedule.enter(period, 1, speedfan.parse_logs, argument=(influx, period))
