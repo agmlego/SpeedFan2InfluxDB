@@ -4,3 +4,6 @@ port = 8086
 user = statistics
 password = insecure
 database = statistics
+
+[schedule]
+polling_period = 15

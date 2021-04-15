@@ -4,7 +4,9 @@ import configparser
 from csv import DictReader
 from datetime import datetime
 from glob import glob
+import logging
 from os.path import basename, join
+from sched import scheduler
 from socket import gethostname
 
 import arrow
@@ -13,6 +15,8 @@ from influxdb import InfluxDBClient, SeriesHelper
 
 config = configparser.ConfigParser()
 config.read('config.ini')
+
+schedule = scheduler()
 
 
 class SpeedFan:
@@ -219,22 +223,23 @@ class SpeedFan:
                 last = series_last
         return last
 
-    def parse_logs(self, client: InfluxDBClient):
+    def parse_logs(self, client: InfluxDBClient, period: float = -1):
         '''Loop through all logs and write the data to Influx'''
 
         SpeedFan.Temp.Meta.client = client
         SpeedFan.PWM.Meta.client = client
         SpeedFan.Fan.Meta.client = client
         SpeedFan.Volt.Meta.client = client
-
+        logger = logging.getLogger('Speedfan')
         logfiles = glob(join(self._dir, 'SFLog*.csv'))
         last = self.find_last(client)
+        counts = {}
         for logfile in logfiles:
             logtime = arrow.get(basename(logfile)[5:13], 'YYYYMMDD').replace(
                 tzinfo=self.tzinfo)
             if logtime.date() < last.date():
                 # old logfile from before the date of the last log in database, skip
-                print(f'Skipping {logfile}, older than {last}')
+                logger.debug(f'Skipping {logfile}, older than {last}')
                 continue
             if self.log_has_header:
                 logs = DictReader(open(logfile), delimiter='\t')
@@ -249,6 +254,10 @@ class SpeedFan:
                 for name in self.header[1:]:
                     value = self.metrics[name]['function'](log[name])
                     dt = timestamp.to('utc').format('YYYY-MM-DDTHH:mm:ss[Z]')
+                    if self.metrics[name]['type'] not in counts:
+                        counts[self.metrics[name]['type']] = 1
+                    else:
+                        counts[self.metrics[name]['type']] += 1
                     if self.metrics[name]['type'] == 'temp':
                         SpeedFan.Temp(
                             host=self.metrics[name]['hostname'],
@@ -295,9 +304,18 @@ class SpeedFan:
                             value=value,
                             time=dt
                         )
+        logger.info(f'Added points since {last}: {counts}')
+        if period > 0:
+            schedule.enter(period, 1, speedfan.parse_logs, argument=(influx, period))
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.INFO,
+        force=True,
+        format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s\t{%(filename)s:%(funcName)s:%(lineno)d}')
+    logger = logging.getLogger('MAIN')
+    logger.info('Starting!')
     influx = InfluxDBClient(
         host=config.get('database', 'host'),
         port=config.getint('database', 'port'),
@@ -307,5 +325,10 @@ if __name__ == '__main__':
     )
 
     speedfan = SpeedFan()
-    print(speedfan.header)
-    speedfan.parse_logs(influx)
+    logger.debug(f'Got headers: {speedfan.header}')
+    period = config.getfloat('schedule', 'polling_period')
+    schedule.enter(period, 1, speedfan.parse_logs, argument=(influx, period))
+
+    while not schedule.empty():
+        logger.info('Tick!')
+        schedule.run()
