@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import configparser
+import logging
+import sys
 from csv import DictReader
 from datetime import datetime
 from glob import glob
-import logging
 from os.path import basename, join
 from sched import scheduler
 from socket import gethostname
@@ -310,7 +311,8 @@ class SpeedFan:
                         )
         logger.info(f'Added points since {last}: {counts}')
         if period > 0:
-            schedule.enter(period, 1, speedfan.parse_logs, argument=(influx, period))
+            schedule.enter(period, 1, speedfan.parse_logs,
+                           argument=(influx, period))
 
 
 if __name__ == '__main__':
@@ -328,7 +330,16 @@ if __name__ == '__main__':
         database=config.get('database', 'database')
     )
 
-    speedfan = SpeedFan(bulk_size = config.getint('database','bulk_size'))
+    bulk_size=config.getint('database', 'bulk_size')
+    if len(sys.argv) > 1:
+        host = sys.argv[1]
+        install_dir = sys.argv[2]
+        logger.info(f'Processing logs (in blocks of {bulk_size}) from {host} in {install_dir}')
+        speedfan = SpeedFan(hostname=host, install_dir=install_dir,
+                            bulk_size=bulk_size)
+    else:
+        speedfan = SpeedFan(bulk_size=bulk_size)
+        logger.info(f'Processing logs (in blocks of {bulk_size}) from {speedfan.hostname} in {speedfan._dir}')
     logger.debug(f'Got headers: {speedfan.header}')
     period = config.getfloat('schedule', 'polling_period')
     schedule.enter(period, 1, speedfan.parse_logs, argument=(influx, period))
