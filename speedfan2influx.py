@@ -120,6 +120,29 @@ class SpeedFan:
         speedfan.read_string(params)
         return speedfan
 
+    def _parse_metric_block(self, block: str) -> tuple:
+        '''Process a metric block to return its contents'''
+        header, *param_block = block.replace('xxx', '').strip().split('\n')
+
+        metric_index, source = header.split(' from ')
+        metric_type, index = metric_index.split(' ')
+        index = int(index)
+
+        params = {}
+        for param in param_block:
+            key, value = param.split('=')
+            if value == 'true':
+                value = True
+            elif value == 'false':
+                value = False
+            else:
+                try:
+                    value = int(value)
+                except ValueError:
+                    pass
+            params[key] = value
+        return source, metric_type, index, params
+
     def _get_metrics(self):
         '''Record which metrics SpeedFan is logging'''
         sens_blocks = open(join(self._dir, 'speedfansens.cfg')).read().split(
@@ -127,29 +150,8 @@ class SpeedFan:
         for block in sens_blocks:
             if not block:
                 continue
-            header, *param_block = block.replace('xxx', '').strip().split('\n')
-
-            try:
-                metric_index, source = header.split(' from ')
-            except ValueError:
-                print(f'{header}:{block}')
-                raise
-            metric_type, index = metric_index.split(' ')
-            index = int(index)
-
-            params = {}
-            for param in param_block:
-                key, value = param.split('=')
-                if value == 'true':
-                    value = True
-                elif value == 'false':
-                    value = False
-                else:
-                    try:
-                        value = int(value)
-                    except ValueError:
-                        pass
-                params[key] = value
+            source, metric_type, index, params = self._parse_metric_block(
+                block)
 
             if params['active'] and params['logged']:
                 # metric is logged and active, enable exporting
