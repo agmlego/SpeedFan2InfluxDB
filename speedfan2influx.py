@@ -304,6 +304,6 @@ if __name__ == '__main__':
         database=config.get('database', 'database')
     )
 
-    speedfan = SpeedFan('E:\\','LabPC-4')
+    speedfan = SpeedFan()
     print(speedfan.header)
     speedfan.parse_logs(influx)
