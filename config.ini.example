@@ -1,0 +1,6 @@
+[database]
+host = localhost
+port = 8086
+user = statistics
+password = insecure
+database = statistics
